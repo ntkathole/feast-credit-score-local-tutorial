@@ -10,17 +10,15 @@ from feast.feature_view import FeatureView
 from feast.on_demand_feature_view import on_demand_feature_view
 from feast.field import Field
 from feast.infra.offline_stores.file_source import FileSource
-from feast.data_format import ParquetFormat
+from feast.data_format import ParquetFormat, JsonFormat
 from feast import RequestSource, FeatureService
+
+# Add streaming imports
+from feast.data_source import KafkaSource
+from feast.stream_feature_view import stream_feature_view
 
 from typing import Any
 
-# Note: Streaming features (KafkaSource, StreamFeatureView) are commented out
-# for compatibility. Uncomment and configure when streaming infrastructure is ready.
-# 
-# from feast.stream_feature_view import StreamFeatureView
-# from feast.data_format import JsonFormat
-# from feast.data_source import KafkaSource
 
 # =============================================================================
 # ENTITIES
@@ -87,8 +85,25 @@ loan_table_source = FileSource(
     owner="risk-team@company.com"
 )
 
-# Streaming sources removed for compatibility
-# Add back when streaming infrastructure is ready
+# =============================================================================
+# STREAM SOURCES
+# =============================================================================
+
+# Real-time loan application stream source
+loan_applications_stream = KafkaSource(
+    name="loan_applications_stream",
+    timestamp_field="event_timestamp",
+    kafka_bootstrap_servers="localhost:9092",
+    message_format=JsonFormat(
+        schema_json="loan_id string, dob_ssn string, event_timestamp timestamp, loan_amnt integer, person_income integer, loan_intent string, application_timestamp string, created timestamp"
+    ),
+    topic="loan-applications",
+    batch_source=loan_table_source,  # Use existing loan table as batch source
+    watermark_delay_threshold=timedelta(minutes=5),
+    description="Real-time stream of loan applications from Kafka",
+    tags={"source_system": "loan_origination", "data_type": "streaming", "update_frequency": "real_time"},
+    owner="risk-team@company.com"
+)
 
 # =============================================================================
 # FEATURE VIEWS
@@ -189,6 +204,78 @@ loan_features = FeatureView(
     description="Loan application characteristics and terms for risk evaluation",
     owner="risk-team@company.com"
 )
+
+# =============================================================================
+# STREAM FEATURE VIEWS
+# =============================================================================
+
+@stream_feature_view(
+    entities=[loan_id, dob_ssn],
+    ttl=timedelta(days=7),  # Short TTL for real-time data
+    mode="python",
+    schema=[
+        Field(name="loan_amnt_usd", dtype=Float64, description="Real-time loan amount in USD",
+              tags={"type": "numerical", "pii": "false", "streaming": "true", "currency": "USD", "core_feature": "true"}),
+        Field(name="income_category", dtype=String, description="Income category based on real-time income",
+              tags={"type": "categorical", "pii": "true", "streaming": "true", "categorization": "true"}),
+        Field(name="loan_urgency_score", dtype=Float64, description="Urgency score based on application timing",
+              tags={"type": "score", "pii": "false", "streaming": "true", "fraud_indicator": "true"}),
+    ],
+    timestamp_field="event_timestamp",
+    online=False,
+    source=loan_applications_stream,
+    tags={"domain": "loan", "team": "risk", "pii": "true", "source": "streaming", "latency": "ultra_low", "freshness": "real_time"},
+    description="Real-time loan application data stream with transformations for immediate credit decisions",
+    owner="risk-team@company.com"
+)
+def realtime_loan_applications(df):
+    """
+    Process real-time loan application data from Kafka stream with transformations.
+    This function transforms the incoming stream data into enhanced features.
+    """
+    import pandas as pd
+    
+    # Convert loan amount to USD (assuming it's already in USD, but could add currency conversion)
+    df['loan_amnt_usd'] = df['loan_amnt'].astype(float)
+    
+    # Categorize income levels
+    def categorize_income(income):
+        if income < 30000:
+            return "LOW"
+        elif income < 75000:
+            return "MEDIUM"
+        elif income < 150000:
+            return "HIGH"
+        else:
+            return "VERY_HIGH"
+    
+    df['income_category'] = df['person_income'].apply(categorize_income)
+    
+    # Calculate urgency score based on application timestamp
+    # This is a simplified calculation - in production you'd use more sophisticated logic
+    df['loan_urgency_score'] = 50.0  # Base score
+    
+    # Adjust urgency based on loan intent
+    urgency_adjustments = {
+        'MEDICAL': 20,      # High urgency for medical loans
+        'EDUCATION': 10,    # Medium urgency for education
+        'VENTURE': 5,       # Lower urgency for business ventures
+        'PERSONAL': 15,     # Medium-high for personal loans
+        'HOMEIMPROVEMENT': 8,  # Lower urgency for home improvement
+        'DEBTCONSOLIDATION': 12  # Medium urgency for debt consolidation
+    }
+    
+    df['loan_urgency_score'] += df['loan_intent'].map(urgency_adjustments).fillna(10)
+    
+    # Ensure score is within bounds
+    df['loan_urgency_score'] = df['loan_urgency_score'].clip(0, 100)
+    
+    # Return only the transformed columns
+    return df[['loan_amnt_usd', 'income_category', 'loan_urgency_score']]
+
+
+
+
 
 # =============================================================================
 # REQUEST SOURCES
@@ -343,17 +430,16 @@ geographic_analysis_service = FeatureService(
     owner="risk-team@company.com"
 )
 
-# Real-time scoring service (using batch features for now)
-# Add streaming features when available
+# Real-time scoring service (using stream feature view)
 realtime_scoring_service = FeatureService(
     name="realtime_scoring_v1",
     features=[
         total_debt_calc,
         financial_ratios,
-        # loan_applications_realtime,  # Uncomment when streaming is ready
+        realtime_loan_applications,  # StreamFeatureView with transformations
     ],
-    tags={"team": "risk", "version": "v1", "use_case": "real_time_scoring", "latency": "low"},
-    description="Low-latency feature set for real-time credit scoring decisions (currently using batch features)",
+    tags={"team": "risk", "version": "v1", "use_case": "real_time_scoring", "latency": "ultra_low"},
+    description="Ultra-low latency feature set for real-time credit scoring decisions using StreamFeatureView with transformations",
     owner="risk-team@company.com"
 )
 

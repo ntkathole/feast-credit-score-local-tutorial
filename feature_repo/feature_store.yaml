@@ -1,9 +1,10 @@
-project: credit_scoring_local
-registry: data/registry.db
+project: credit_score_project1
 provider: local
+registry: 
+  path: data/registry.db 
 online_store:
-   type: sqlite
-   path: data/online_store.db
+  type: redis
+  connection_string: localhost:6379
 offline_store:
-    type: file
+  type: file
 entity_key_serialization_version: 3
